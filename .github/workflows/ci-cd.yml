@@ -134,6 +134,14 @@ jobs:
       - name: Install dependencies
         run: go mod download
 
+      - name: Install MongoDB tools
+        run: |
+          # Install MongoDB Shell
+          wget -qO - https://www.mongodb.org/static/pgp/server-7.0.asc | sudo apt-key add -
+          echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
+          sudo apt-get update
+          sudo apt-get install -y mongodb-mongosh
+
       - name: Wait for services to be ready
         run: |
           # Wait for PostgreSQL
@@ -142,17 +150,59 @@ jobs:
             sleep 2
           done
 
-          # Wait for MongoDB
-          until mongosh --host localhost:27017 --eval "db.adminCommand('ping')" --quiet; do
+          # Wait for MongoDB with proper connection string
+          until mongosh "mongodb://admin:admin@localhost:27017/admin?authSource=admin" --eval "db.adminCommand('ping')" --quiet; do
             echo "Waiting for MongoDB..."
             sleep 2
           done
 
-          # Wait for RabbitMQ
-          until curl -f http://localhost:15672/api/overview -u admin:admin; do
+          # Alternative MongoDB check using netcat if mongosh fails
+          if ! command -v mongosh &> /dev/null; then
+            echo "mongosh not found, using netcat for MongoDB check"
+            until nc -z localhost 27017; do
+              echo "Waiting for MongoDB..."
+              sleep 2
+            done
+          fi
+
+          # Wait for RabbitMQ Management API
+          until curl -f http://localhost:15672/api/overview -u admin:admin --connect-timeout 5 --max-time 10; do
             echo "Waiting for RabbitMQ..."
             sleep 5
           done
+
+      - name: Verify service connectivity
+        run: |
+          echo "=== Service Connectivity Check ==="
+          
+          # Test PostgreSQL
+          if pg_isready -h localhost -p 5432 -U postgres; then
+            echo "✅ PostgreSQL is ready"
+          else
+            echo "❌ PostgreSQL connection failed"
+            exit 1
+          fi
+          
+          # Test MongoDB
+          if mongosh "mongodb://admin:admin@localhost:27017/admin?authSource=admin" --eval "print('MongoDB connection successful')" --quiet; then
+            echo "✅ MongoDB is ready"
+          else
+            echo "❌ MongoDB connection failed"
+            # Try alternative check
+            if nc -z localhost 27017; then
+              echo "⚠️  MongoDB port is open but mongosh failed"
+            else
+              exit 1
+            fi
+          fi
+          
+          # Test RabbitMQ
+          if curl -f http://localhost:15672/api/overview -u admin:admin --connect-timeout 5 --max-time 10; then
+            echo "✅ RabbitMQ is ready"
+          else
+            echo "❌ RabbitMQ connection failed"
+            exit 1
+          fi
 
       - name: Run integration tests
         env:
@@ -215,59 +265,112 @@ jobs:
           # Start all services
           docker-compose up -d
           
-          # Wait for services to be healthy
-          timeout 300 bash -c 'until docker-compose ps | grep -q "healthy.*healthy.*healthy"; do echo "Waiting for services..."; sleep 10; done'
+          # Wait for services to be healthy with timeout
+          echo "Waiting for services to be healthy..."
+          timeout 300 bash -c '
+            while true; do
+              if docker-compose ps | grep -q "healthy.*healthy.*healthy"; then
+                echo "All services are healthy"
+                break
+              fi
+              echo "Services not ready yet, checking again in 10 seconds..."
+              docker-compose ps
+              sleep 10
+            done
+          ' || {
+            echo "Services failed to become healthy within timeout"
+            echo "=== Service Status ==="
+            docker-compose ps
+            echo "=== Service Logs ==="
+            docker-compose logs
+            exit 1
+          }
 
       - name: Run health checks
         run: |
           # Wait a bit more for API Gateway to be ready
           sleep 30
           
-          # Test health endpoints
-          curl -f http://localhost/health || exit 1
-          curl -f http://localhost/ready || exit 1
+          # Test health endpoints with retries
+          echo "Testing health endpoints..."
+          for i in {1..5}; do
+            if curl -f http://localhost/health --connect-timeout 10 --max-time 30; then
+              echo "✅ Health endpoint is responding"
+              break
+            else
+              echo "⚠️  Health endpoint not ready, attempt $i/5"
+              if [ $i -eq 5 ]; then
+                echo "❌ Health endpoint failed after 5 attempts"
+                exit 1
+              fi
+              sleep 10
+            fi
+          done
           
-          # Test processing mode
-          curl -f http://localhost/api/v1/processing-mode || exit 1
+          # Test readiness endpoint
+          curl -f http://localhost/ready --connect-timeout 10 --max-time 30 || exit 1
+          
+          # Test processing mode endpoint
+          curl -f http://localhost/api/v1/processing-mode --connect-timeout 10 --max-time 30 || exit 1
 
       - name: Test API functionality
         run: |
           # Test account creation
+          echo "Testing account creation..."
           ACCOUNT_RESPONSE=$(curl -s -X POST http://localhost/api/v1/accounts \
             -H "Content-Type: application/json" \
-            -d '{"owner_name": "CI Test User", "initial_balance": 1000.00}')
+            -d '{"owner_name": "CI Test User", "initial_balance": 1000.00}' \
+            --connect-timeout 10 --max-time 30)
           
           echo "Account creation response: $ACCOUNT_RESPONSE"
           
-          # Extract account ID
-          ACCOUNT_ID=$(echo $ACCOUNT_RESPONSE | jq -r '.account.id')
+          # Extract account ID (handle different response formats)
+          ACCOUNT_ID=$(echo $ACCOUNT_RESPONSE | jq -r '.account.id // .id // empty')
+          if [ -z "$ACCOUNT_ID" ] || [ "$ACCOUNT_ID" = "null" ]; then
+            echo "❌ Failed to extract account ID from response"
+            echo "Response: $ACCOUNT_RESPONSE"
+            exit 1
+          fi
           echo "Created account ID: $ACCOUNT_ID"
           
           # Test account retrieval
-          curl -f "http://localhost/api/v1/accounts/$ACCOUNT_ID" || exit 1
+          echo "Testing account retrieval..."
+          curl -f "http://localhost/api/v1/accounts/$ACCOUNT_ID" --connect-timeout 10 --max-time 30 || exit 1
           
           # Test transaction processing
+          echo "Testing transaction processing..."
           curl -s -X POST "http://localhost/api/v1/accounts/$ACCOUNT_ID/transactions" \
             -H "Content-Type: application/json" \
-            -d '{"type": "deposit", "amount": 500.00, "description": "CI test deposit"}' || exit 1
+            -d '{"type": "deposit", "amount": 500.00, "description": "CI test deposit"}' \
+            --connect-timeout 10 --max-time 30 || exit 1
           
           # Test transaction history
-          curl -f "http://localhost/api/v1/accounts/$ACCOUNT_ID/transactions" || exit 1
+          echo "Testing transaction history..."
+          curl -f "http://localhost/api/v1/accounts/$ACCOUNT_ID/transactions" --connect-timeout 10 --max-time 30 || exit 1
 
       - name: Test Swagger documentation
         run: |
           # Test if Swagger UI is accessible
-          curl -f http://localhost:8081 || exit 1
+          echo "Testing Swagger UI..."
+          curl -f http://localhost:8081 --connect-timeout 10 --max-time 30 || exit 1
 
       - name: Collect logs on failure
         if: failure()
         run: |
+          echo "=== Container Status ==="
+          docker-compose ps
+          echo ""
           echo "=== API Gateway Logs ==="
           docker-compose logs api-gateway
+          echo ""
           echo "=== Banking API Logs ==="
           docker-compose logs banking-api
+          echo ""
           echo "=== Database Logs ==="
           docker-compose logs postgres mongodb rabbitmq
+          echo ""
+          echo "=== All Services Logs ==="
+          docker-compose logs
 
       - name: Cleanup
         if: always()
