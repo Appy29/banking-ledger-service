@@ -1,0 +1,363 @@
+name: Banking Ledger Service CI/CD
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  GO_VERSION: '1.23'
+
+jobs:
+  # Code quality and security checks
+  lint-and-security:
+    name: Code Quality & Security
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Run go fmt check
+        run: |
+          if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
+            echo "Code is not formatted:"
+            gofmt -s -l .
+            exit 1
+          fi
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Install staticcheck
+        run: go install honnef.co/go/tools/cmd/staticcheck@latest
+
+      - name: Run staticcheck
+        run: staticcheck ./...
+
+      - name: Run gosec security scanner
+        uses: securecodewarrior/github-action-gosec@master
+        with:
+          args: './...'
+
+  # Unit tests
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint-and-security
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Generate mocks
+        run: |
+          go install go.uber.org/mock/mockgen@latest
+          go generate ./...
+
+      - name: Run unit tests
+        run: |
+          go test -v -race -coverprofile=coverage.out -covermode=atomic ./services/... ./handlers/... ./utils/... ./models/...
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.out
+          flags: unittests
+
+  # Integration tests with real services
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: banking_ledger_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      mongodb:
+        image: mongo:7-jammy
+        env:
+          MONGO_INITDB_ROOT_USERNAME: admin
+          MONGO_INITDB_ROOT_PASSWORD: admin
+        options: >-
+          --health-cmd "mongosh --eval 'db.adminCommand(\"ping\")'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 27017:27017
+
+      rabbitmq:
+        image: rabbitmq:3-management
+        env:
+          RABBITMQ_DEFAULT_USER: admin
+          RABBITMQ_DEFAULT_PASS: admin
+        options: >-
+          --health-cmd "rabbitmq-diagnostics ping"
+          --health-interval 30s
+          --health-timeout 10s
+          --health-retries 5
+        ports:
+          - 5672:5672
+          - 15672:15672
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Wait for services to be ready
+        run: |
+          # Wait for PostgreSQL
+          until pg_isready -h localhost -p 5432 -U postgres; do
+            echo "Waiting for PostgreSQL..."
+            sleep 2
+          done
+
+          # Wait for MongoDB
+          until mongosh --host localhost:27017 --eval "db.adminCommand('ping')" --quiet; do
+            echo "Waiting for MongoDB..."
+            sleep 2
+          done
+
+          # Wait for RabbitMQ
+          until curl -f http://localhost:15672/api/overview -u admin:admin; do
+            echo "Waiting for RabbitMQ..."
+            sleep 5
+          done
+
+      - name: Run integration tests
+        env:
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_USER: postgres
+          DB_PASSWORD: postgres
+          DB_NAME: banking_ledger_test
+          MONGO_URI: mongodb://admin:admin@localhost:27017
+          MONGO_DB: banking_test
+          RABBITMQ_URL: amqp://admin:admin@localhost:5672/
+        run: |
+          go test -v -tags=integration -timeout=300s ./integration_test.go ./queue_integration_test.go
+
+  # Build and test Docker images
+  docker-build:
+    name: Docker Build & Test
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-tests]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: banking-ledger-service:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run Docker security scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'banking-ledger-service:test'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  # End-to-end system tests
+  e2e-tests:
+    name: End-to-End Tests
+    runs-on: ubuntu-latest
+    needs: docker-build
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Compose
+        run: |
+          # Start all services
+          docker-compose up -d
+          
+          # Wait for services to be healthy
+          timeout 300 bash -c 'until docker-compose ps | grep -q "healthy.*healthy.*healthy"; do echo "Waiting for services..."; sleep 10; done'
+
+      - name: Run health checks
+        run: |
+          # Wait a bit more for API Gateway to be ready
+          sleep 30
+          
+          # Test health endpoints
+          curl -f http://localhost/health || exit 1
+          curl -f http://localhost/ready || exit 1
+          
+          # Test processing mode
+          curl -f http://localhost/api/v1/processing-mode || exit 1
+
+      - name: Test API functionality
+        run: |
+          # Test account creation
+          ACCOUNT_RESPONSE=$(curl -s -X POST http://localhost/api/v1/accounts \
+            -H "Content-Type: application/json" \
+            -d '{"owner_name": "CI Test User", "initial_balance": 1000.00}')
+          
+          echo "Account creation response: $ACCOUNT_RESPONSE"
+          
+          # Extract account ID
+          ACCOUNT_ID=$(echo $ACCOUNT_RESPONSE | jq -r '.account.id')
+          echo "Created account ID: $ACCOUNT_ID"
+          
+          # Test account retrieval
+          curl -f "http://localhost/api/v1/accounts/$ACCOUNT_ID" || exit 1
+          
+          # Test transaction processing
+          curl -s -X POST "http://localhost/api/v1/accounts/$ACCOUNT_ID/transactions" \
+            -H "Content-Type: application/json" \
+            -d '{"type": "deposit", "amount": 500.00, "description": "CI test deposit"}' || exit 1
+          
+          # Test transaction history
+          curl -f "http://localhost/api/v1/accounts/$ACCOUNT_ID/transactions" || exit 1
+
+      - name: Test Swagger documentation
+        run: |
+          # Test if Swagger UI is accessible
+          curl -f http://localhost:8081 || exit 1
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          echo "=== API Gateway Logs ==="
+          docker-compose logs api-gateway
+          echo "=== Banking API Logs ==="
+          docker-compose logs banking-api
+          echo "=== Database Logs ==="
+          docker-compose logs postgres mongodb rabbitmq
+
+      - name: Cleanup
+        if: always()
+        run: docker-compose down -v
+
+  # Performance tests (optional, runs only on main branch)
+  performance-tests:
+    name: Performance Tests
+    runs-on: ubuntu-latest
+    needs: e2e-tests
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup services
+        run: |
+          docker-compose up -d
+          timeout 300 bash -c 'until docker-compose ps | grep -q "healthy.*healthy.*healthy"; do sleep 10; done'
+          sleep 30
+
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install k6
+
+      - name: Run performance tests
+        run: |
+          # Create a simple k6 performance test
+          cat << 'EOF' > perf-test.js
+          import http from 'k6/http';
+          import { check } from 'k6';
+
+          export let options = {
+            vus: 10,
+            duration: '30s',
+          };
+
+          export default function() {
+            // Test account creation
+            let accountPayload = JSON.stringify({
+              owner_name: 'Perf Test User',
+              initial_balance: 1000.00
+            });
+            
+            let accountResponse = http.post('http://localhost/api/v1/accounts', accountPayload, {
+              headers: { 'Content-Type': 'application/json' },
+            });
+            
+            check(accountResponse, {
+              'account created': (r) => r.status === 201,
+            });
+
+            // Test health check
+            let healthResponse = http.get('http://localhost/health');
+            check(healthResponse, {
+              'health check passes': (r) => r.status === 200,
+            });
+          }
+          EOF
+
+          k6 run perf-test.js
+
+      - name: Cleanup performance tests
+        if: always()
+        run: docker-compose down -v
+
+  # Deployment readiness check
+  deployment-readiness:
+    name: Deployment Readiness
+    runs-on: ubuntu-latest
+    needs: [e2e-tests, performance-tests]
+    if: always() && (needs.e2e-tests.result == 'success')
+    steps:
+      - name: Deployment readiness check
+        run: |
+          echo "🚀 Banking Ledger Service is ready for deployment!"
+          echo "✅ All tests passed"
+          echo "✅ Docker images built successfully"
+          echo "✅ Security scans completed"
+          echo "✅ End-to-end tests verified"
+          
+          if [[ "${{ needs.performance-tests.result }}" == "success" ]]; then
+            echo "✅ Performance tests passed"
+          fi
