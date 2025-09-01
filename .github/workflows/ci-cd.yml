@@ -244,11 +244,11 @@ jobs:
         run: |
           echo "Verifying Docker image was built successfully..."
           docker images | grep banking-ledger-service || {
-            echo "❌ Docker image not found. Available images:"
+            echo "Docker image not found. Available images:"
             docker images
             exit 1
           }
-          echo "✅ Docker image built successfully"
+          echo "Docker image built successfully"
           docker inspect banking-ledger-service:test
 
       - name: Run Docker security scan
@@ -270,14 +270,14 @@ jobs:
         if: always()
         run: |
           if [ -f "trivy-results.sarif" ]; then
-            echo "✅ Trivy scan completed successfully"
+            echo "Trivy scan completed successfully"
             # Show a summary of findings
             if command -v jq &> /dev/null; then
               echo "Security scan summary:"
               jq -r '.runs[0].results | length' trivy-results.sarif 2>/dev/null || echo "Results processed"
             fi
           else
-            echo "⚠️ Trivy scan results not found"
+            echo "Trivy scan results not found"
           fi
 
   # End-to-end system tests
@@ -339,31 +339,31 @@ jobs:
               # Test if banking-api is responding (even if marked unhealthy)
               echo "Testing Banking API directly on port 8080..."
               if curl -f http://localhost:8080/health --connect-timeout 5 --max-time 10 2>/dev/null; then
-                echo "✅ Banking API is responding"
+                echo "Banking API is responding"
                 API_HEALTHY=1
               elif curl -f http://localhost:8080/ --connect-timeout 5 --max-time 10 2>/dev/null; then
-                echo "✅ Banking API root endpoint is responding"
+                echo "Banking API root endpoint is responding"
                 API_HEALTHY=1
               else
-                echo "⚠️ Banking API not responding yet"
+                echo "Banking API not responding yet"
                 API_HEALTHY=0
               fi
               
               # Test if api-gateway is responding (even if marked unhealthy)
               if curl -f http://localhost/health --connect-timeout 5 --max-time 10 2>/dev/null; then
-                echo "✅ API Gateway is responding"
+                echo "API Gateway is responding"
                 GATEWAY_HEALTHY=1
               else
-                echo "⚠️ API Gateway not responding yet"
+                echo "API Gateway not responding yet"
               fi
               
               # If both APIs are responding, we can proceed
               # Also proceed if Gateway is healthy (it proxies to Banking API)
               if [ $API_HEALTHY -eq 1 ] && [ $GATEWAY_HEALTHY -eq 1 ]; then
-                echo "🎉 All critical services are responding!"
+                echo "All critical services are responding"
                 break
               elif [ $GATEWAY_HEALTHY -eq 1 ]; then
-                echo "🎉 API Gateway is responding and can proxy to Banking API!"
+                echo "API Gateway is responding and can proxy to Banking API"
                 echo "Note: Banking API may not be directly exposed (normal for containerized setup)"
                 break
               fi
@@ -387,7 +387,7 @@ jobs:
           
           # Final check
           if [ $ELAPSED -ge $TIMEOUT ]; then
-            echo "❌ Timeout reached. Services failed to become healthy within $TIMEOUT seconds"
+            echo "Timeout reached. Services failed to become healthy within $TIMEOUT seconds"
             echo "=== Final Service Status ==="
             ${{ env.COMPOSE_CMD }} ps
             echo "=== Final Service Logs ==="
@@ -429,7 +429,7 @@ jobs:
       - name: Test API functionality
         if: env.HEALTH_CHECK_FAILED != 'true'
         run: |
-          echo "🧪 Running API functionality tests..."
+          echo "Running API functionality tests..."
           
           # Test account creation
           echo "Testing account creation..."
@@ -443,7 +443,7 @@ jobs:
           # Extract account ID (handle different response formats)
           ACCOUNT_ID=$(echo $ACCOUNT_RESPONSE | jq -r '.account.id // .id // empty' 2>/dev/null || echo "")
           if [ -z "$ACCOUNT_ID" ] || [ "$ACCOUNT_ID" = "null" ]; then
-            echo "❌ Failed to extract account ID from response"
+            echo "Failed to extract account ID from response"
             echo "Response: $ACCOUNT_RESPONSE"
             exit 1
           fi
@@ -464,7 +464,7 @@ jobs:
           echo "Testing transaction history..."
           curl -f "http://localhost/api/v1/accounts/$ACCOUNT_ID/transactions" --connect-timeout 10 --max-time 30 || exit 1
           
-          echo "✅ All API functionality tests passed!"
+          echo "All API functionality tests passed"
 
       - name: Test Swagger documentation
         if: env.HEALTH_CHECK_FAILED != 'true'
@@ -472,12 +472,12 @@ jobs:
           # Test if Swagger UI is accessible
           echo "Testing Swagger UI..."
           curl -f http://localhost:8081 --connect-timeout 10 --max-time 30 || exit 1
-          echo "✅ Swagger UI is accessible"
+          echo "Swagger UI is accessible"
 
       - name: Skip tests due to service issues
         if: env.HEALTH_CHECK_FAILED == 'true'
         run: |
-          echo "⚠️ SKIPPING API and Swagger tests due to service health issues"
+          echo "SKIPPING API and Swagger tests due to service health issues"
           echo "This may indicate:"
           echo "  - Application startup issues"
           echo "  - Configuration problems"  
@@ -597,12 +597,12 @@ jobs:
     steps:
       - name: Deployment readiness check
         run: |
-          echo "🚀 Banking Ledger Service is ready for deployment!"
-          echo "✅ All tests passed"
-          echo "✅ Docker images built successfully"
-          echo "✅ Security scans completed"
-          echo "✅ End-to-end tests verified"
+          echo "Banking Ledger Service is ready for deployment"
+          echo "All tests passed"
+          echo "Docker images built successfully"
+          echo "Security scans completed"
+          echo "End-to-end tests verified"
           
           if [[ "${{ needs.performance-tests.result }}" == "success" ]]; then
-            echo "✅ Performance tests passed"
+            echo "Performance tests passed"
           fi
