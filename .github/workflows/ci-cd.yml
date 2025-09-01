@@ -289,29 +289,47 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Check Docker Compose availability
+        run: |
+          echo "Checking Docker Compose availability..."
+          if command -v docker-compose &> /dev/null; then
+            echo "✅ docker-compose command available"
+            COMPOSE_CMD="docker-compose"
+          elif docker compose version &> /dev/null; then
+            echo "✅ docker compose plugin available"
+            COMPOSE_CMD="docker compose"
+          else
+            echo "❌ Neither docker-compose nor docker compose found"
+            echo "Available Docker info:"
+            docker --version
+            docker info
+            exit 1
+          fi
+          echo "COMPOSE_CMD=$COMPOSE_CMD" >> $GITHUB_ENV
+
       - name: Setup Docker Compose
         run: |
           # Start all services
-          docker-compose up -d
+          ${{ env.COMPOSE_CMD }} up -d
           
           # Wait for services to be healthy with timeout
           echo "Waiting for services to be healthy..."
           timeout 300 bash -c '
             while true; do
-              if docker-compose ps | grep -q "healthy.*healthy.*healthy"; then
+              if ${{ env.COMPOSE_CMD }} ps | grep -q "healthy.*healthy.*healthy"; then
                 echo "All services are healthy"
                 break
               fi
               echo "Services not ready yet, checking again in 10 seconds..."
-              docker-compose ps
+              ${{ env.COMPOSE_CMD }} ps
               sleep 10
             done
           ' || {
             echo "Services failed to become healthy within timeout"
             echo "=== Service Status ==="
-            docker-compose ps
+            ${{ env.COMPOSE_CMD }} ps
             echo "=== Service Logs ==="
-            docker-compose logs
+            ${{ env.COMPOSE_CMD }} logs
             exit 1
           }
 
@@ -387,23 +405,23 @@ jobs:
         if: failure()
         run: |
           echo "=== Container Status ==="
-          docker-compose ps
+          ${{ env.COMPOSE_CMD }} ps
           echo ""
           echo "=== API Gateway Logs ==="
-          docker-compose logs api-gateway
+          ${{ env.COMPOSE_CMD }} logs api-gateway
           echo ""
           echo "=== Banking API Logs ==="
-          docker-compose logs banking-api
+          ${{ env.COMPOSE_CMD }} logs banking-api
           echo ""
           echo "=== Database Logs ==="
-          docker-compose logs postgres mongodb rabbitmq
+          ${{ env.COMPOSE_CMD }} logs postgres mongodb rabbitmq
           echo ""
           echo "=== All Services Logs ==="
-          docker-compose logs
+          ${{ env.COMPOSE_CMD }} logs
 
       - name: Cleanup
         if: always()
-        run: docker-compose down -v
+        run: ${{ env.COMPOSE_CMD }} down -v
 
   # Performance tests (optional, runs only on main branch)
   performance-tests:
@@ -415,10 +433,25 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Check Docker Compose availability
+        run: |
+          echo "Checking Docker Compose availability..."
+          if command -v docker-compose &> /dev/null; then
+            echo "✅ docker-compose command available"
+            COMPOSE_CMD="docker-compose"
+          elif docker compose version &> /dev/null; then
+            echo "✅ docker compose plugin available"
+            COMPOSE_CMD="docker compose"
+          else
+            echo "❌ Neither docker-compose nor docker compose found"
+            exit 1
+          fi
+          echo "COMPOSE_CMD=$COMPOSE_CMD" >> $GITHUB_ENV
+
       - name: Setup services
         run: |
-          docker-compose up -d
-          timeout 300 bash -c 'until docker-compose ps | grep -q "healthy.*healthy.*healthy"; do sleep 10; done'
+          ${{ env.COMPOSE_CMD }} up -d
+          timeout 300 bash -c 'until ${{ env.COMPOSE_CMD }} ps | grep -q "healthy.*healthy.*healthy"; do sleep 10; done'
           sleep 30
 
       - name: Install k6
@@ -468,7 +501,7 @@ jobs:
 
       - name: Cleanup performance tests
         if: always()
-        run: docker-compose down -v
+        run: ${{ env.COMPOSE_CMD }} down -v
 
   # Deployment readiness check
   deployment-readiness:
