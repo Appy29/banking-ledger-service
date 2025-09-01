@@ -1,0 +1,146 @@
+# docker-compose.yml - Complete Banking Service Stack
+services:
+  # API Gateway - Nginx Reverse Proxy
+  api-gateway:
+    image: nginx:alpine
+    container_name: banking-api-gateway
+    ports:
+      - "80:80"
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/nginx.conf
+    depends_on:
+      - banking-api
+    networks:
+      - banking-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Banking Service (Containerized)
+  banking-api:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: banking-api
+    environment:
+      DB_HOST: postgres
+      MONGO_URI: mongodb://admin:admin@mongodb:27017
+      RABBITMQ_URL: amqp://admin:admin@rabbitmq:5672/
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 8080
+      ENVIRONMENT: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - banking-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # Swagger UI Interface  
+  swagger-ui:
+    image: swaggerapi/swagger-ui
+    container_name: banking-swagger-ui
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./docs/swagger.yml:/usr/share/nginx/html/swagger.yml:ro
+    environment:
+      SWAGGER_JSON_URL: "/swagger.yml"
+    networks:
+      - banking-network
+
+  # PostgreSQL for account data
+  postgres:
+    image: postgres:15-alpine
+    container_name: banking-postgres
+    environment:
+      POSTGRES_DB: banking_ledger
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - banking-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d banking_ledger"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MongoDB for transaction logs
+  mongodb:
+    image: mongo:7-jammy
+    container_name: banking-mongodb
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: admin
+      MONGO_INITDB_DATABASE: transactions
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - banking-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # RabbitMQ for async transaction processing
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: banking-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: admin
+    ports:
+      - "5672:5672"    # AMQP port
+      - "15672:15672"  # Management UI
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - banking-network
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # pgAdmin for database management (optional but helpful)
+  pgadmin:
+    image: dpage/pgadmin4:7
+    container_name: banking-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@banking.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+    ports:
+      - "5050:80"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - banking-network
+
+volumes:
+  postgres_data:
+  mongodb_data:
+  rabbitmq_data:
+
+networks:
+  banking-network:
+    driver: bridge
