@@ -332,26 +332,28 @@ jobs:
             if [ $HEALTHY_COUNT -ge 3 ]; then
               echo "Database services are healthy, checking API services..."
               
+              # Initialize flags
+              API_HEALTHY=0
+              GATEWAY_HEALTHY=0
+              
               # Test if banking-api is responding (even if marked unhealthy)
               if curl -f http://localhost:8080/health --connect-timeout 5 --max-time 10 2>/dev/null; then
                 echo "✅ Banking API is responding"
-                API_HEALTHY="true"
+                API_HEALTHY=1
               else
                 echo "⚠️ Banking API not responding yet"
-                API_HEALTHY="false"
               fi
               
               # Test if api-gateway is responding (even if marked unhealthy)
               if curl -f http://localhost/health --connect-timeout 5 --max-time 10 2>/dev/null; then
                 echo "✅ API Gateway is responding"
-                GATEWAY_HEALTHY="true"
+                GATEWAY_HEALTHY=1
               else
                 echo "⚠️ API Gateway not responding yet"
-                GATEWAY_HEALTHY="false"
               fi
               
               # If both APIs are responding, we can proceed
-              if [ "$API_HEALTHY" = "true" ] && [ "$GATEWAY_HEALTHY" = "true" ]; then
+              if [ $API_HEALTHY -eq 1 ] && [ $GATEWAY_HEALTHY -eq 1 ]; then
                 echo "🎉 All critical services are responding!"
                 break
               fi
