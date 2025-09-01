@@ -1,0 +1,623 @@
+openapi: 3.0.3
+info:
+  title: Banking Ledger Service API
+  description: |
+    A high-performance banking ledger service with asynchronous transaction processing.
+    
+    ## Features
+    - Account creation with initial balances
+    - Synchronous and asynchronous transaction processing
+    - Transaction history with pagination
+    - ACID-compliant balance updates
+    - RabbitMQ queue integration for high-load scenarios
+    
+    ## Processing Modes
+    - **Sync Mode**: Immediate transaction processing (fallback)
+    - **Async Mode**: Queue-based processing with status tracking
+    
+    ## Architecture
+    The service uses PostgreSQL for account balances and MongoDB for transaction logs,
+    with RabbitMQ handling asynchronous transaction processing through worker pools.
+  version: 1.0.0
+  contact:
+    name: Banking Ledger Service
+    email: admin@banking.com
+servers:
+  - url: http://localhost
+    description: Local API Gateway
+  - url: http://localhost:8080
+    description: Direct Service Access (Development Only)
+
+tags:
+  - name: Health
+    description: Service health and readiness checks
+  - name: Accounts
+    description: Account management operations
+  - name: Transactions
+    description: Transaction processing and history
+  - name: System
+    description: System information and monitoring
+
+paths:
+  /health:
+    get:
+      tags:
+        - Health
+      summary: Health check
+      description: Basic liveness check for the service
+      operationId: healthCheck
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: healthy
+                  service:
+                    type: string
+                    example: banking-ledger-service
+                  version:
+                    type: string
+                    example: 1.0.0
+
+  /ready:
+    get:
+      tags:
+        - Health
+      summary: Readiness check
+      description: Comprehensive readiness check including database and queue connectivity
+      operationId: readyCheck
+      responses:
+        '200':
+          description: Service is ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ready
+                  services:
+                    type: object
+                    properties:
+                      postgres:
+                        $ref: '#/components/schemas/ServiceStatus'
+                      mongodb:
+                        $ref: '#/components/schemas/ServiceStatus'
+                      rabbitmq:
+                        $ref: '#/components/schemas/ServiceStatus'
+        '503':
+          description: Service not ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: not_ready
+                  services:
+                    type: object
+
+  /api/v1/accounts:
+    post:
+      tags:
+        - Accounts
+      summary: Create account
+      description: Create a new bank account with specified initial balance
+      operationId: createAccount
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAccountRequest'
+            examples:
+              basic_account:
+                summary: Basic account creation
+                value:
+                  owner_name: "John Doe"
+                  initial_balance: 1000.00
+              zero_balance:
+                summary: Account with zero balance
+                value:
+                  owner_name: "Jane Smith"
+                  initial_balance: 0.00
+      responses:
+        '201':
+          description: Account created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Account created successfully
+                  account:
+                    $ref: '#/components/schemas/Account'
+        '400':
+          description: Invalid request data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/accounts/{id}:
+    get:
+      tags:
+        - Accounts
+      summary: Get account
+      description: Retrieve account information by account ID
+      operationId: getAccount
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Account ID
+          schema:
+            type: string
+            example: acc_1234567890abcdef
+      responses:
+        '200':
+          description: Account retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  account:
+                    $ref: '#/components/schemas/Account'
+        '404':
+          description: Account not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/accounts/{id}/transactions:
+    post:
+      tags:
+        - Transactions
+      summary: Process transaction
+      description: |
+        Process a deposit or withdrawal transaction.
+        
+        **Processing Modes:**
+        - **Async Mode** (default): Returns immediately with pending status, processed by background workers
+        - **Sync Mode** (fallback): Processes immediately if queue is unavailable
+      operationId: processTransaction
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Account ID
+          schema:
+            type: string
+            example: acc_1234567890abcdef
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransactionRequest'
+            examples:
+              deposit:
+                summary: Deposit transaction
+                value:
+                  type: "deposit"
+                  amount: 500.00
+                  description: "Salary deposit"
+              withdrawal:
+                summary: Withdrawal transaction
+                value:
+                  type: "withdraw"
+                  amount: 200.00
+                  description: "ATM withdrawal"
+      responses:
+        '200':
+          description: Transaction processed synchronously
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Transaction processed successfully
+                  transaction:
+                    $ref: '#/components/schemas/Transaction'
+                  processing_mode:
+                    type: string
+                    example: sync
+        '202':
+          description: Transaction queued for asynchronous processing
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Transaction queued for processing
+                  transaction_id:
+                    type: string
+                    example: txn_1234567890abcdef
+                  status:
+                    type: string
+                    example: pending
+                  account_id:
+                    type: string
+                    example: acc_1234567890abcdef
+                  processing_mode:
+                    type: string
+                    example: async
+        '400':
+          description: Invalid transaction request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Account not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    get:
+      tags:
+        - Transactions
+      summary: Get transaction history
+      description: Retrieve paginated transaction history for an account
+      operationId: getTransactions
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Account ID
+          schema:
+            type: string
+            example: acc_1234567890abcdef
+        - name: page
+          in: query
+          required: false
+          description: Page number
+          schema:
+            type: integer
+            minimum: 1
+            example: 1
+        - name: limit
+          in: query
+          required: false
+          description: Number of transactions per page
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            example: 10
+      responses:
+        '200':
+          description: Transaction history retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  transactions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Transaction'
+                  pagination:
+                    $ref: '#/components/schemas/PaginationInfo'
+        '400':
+          description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/transactions/{id}:
+    get:
+      tags:
+        - Transactions
+      summary: Get transaction
+      description: Retrieve a specific transaction by transaction ID
+      operationId: getTransaction
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Transaction ID
+          schema:
+            type: string
+            example: txn_1234567890abcdef
+      responses:
+        '200':
+          description: Transaction retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  transaction:
+                    $ref: '#/components/schemas/Transaction'
+        '404':
+          description: Transaction not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/processing-mode:
+    get:
+      tags:
+        - System
+      summary: Get processing mode
+      description: Get current transaction processing mode and queue status
+      operationId: getProcessingMode
+      responses:
+        '200':
+          description: Processing mode information
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  processing_mode:
+                    type: string
+                    enum: [sync, async]
+                    example: async
+                    description: Current processing mode
+                  queue_status:
+                    type: string
+                    enum: [connected, disconnected]
+                    example: connected
+                    description: RabbitMQ connection status
+                  async_enabled:
+                    type: boolean
+                    example: true
+                    description: Whether async processing is enabled
+
+components:
+  schemas:
+    Account:
+      type: object
+      required:
+        - id
+        - owner_name
+        - balance
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          description: Unique account identifier
+          example: acc_1234567890abcdef
+        owner_name:
+          type: string
+          description: Account owner's name
+          example: John Doe
+        balance:
+          type: number
+          format: double
+          description: Current account balance
+          example: 1500.75
+        created_at:
+          type: string
+          format: date-time
+          description: Account creation timestamp
+          example: "2024-08-30T20:55:11Z"
+        updated_at:
+          type: string
+          format: date-time
+          description: Last update timestamp
+          example: "2024-08-30T20:55:11Z"
+
+    CreateAccountRequest:
+      type: object
+      required:
+        - owner_name
+        - initial_balance
+      properties:
+        owner_name:
+          type: string
+          description: Name of the account owner
+          example: John Doe
+          minLength: 1
+        initial_balance:
+          type: number
+          format: double
+          description: Initial account balance
+          example: 1000.00
+          minimum: 0
+
+    Transaction:
+      type: object
+      required:
+        - id
+        - transaction_id
+        - account_id
+        - type
+        - amount
+        - previous_balance
+        - new_balance
+        - timestamp
+        - status
+      properties:
+        id:
+          type: string
+          description: Internal transaction identifier
+          example: txn_1234567890abcdef
+        transaction_id:
+          type: string
+          description: External transaction identifier
+          example: txn_1234567890abcdef
+        account_id:
+          type: string
+          description: Associated account identifier
+          example: acc_1234567890abcdef
+        type:
+          type: string
+          enum: [deposit, withdraw]
+          description: Transaction type
+          example: deposit
+        amount:
+          type: number
+          format: double
+          description: Transaction amount
+          example: 250.00
+        previous_balance:
+          type: number
+          format: double
+          description: Account balance before transaction
+          example: 1000.00
+        new_balance:
+          type: number
+          format: double
+          description: Account balance after transaction
+          example: 1250.00
+        description:
+          type: string
+          description: Transaction description
+          example: Salary deposit
+        timestamp:
+          type: string
+          format: date-time
+          description: Transaction timestamp
+          example: "2024-08-30T20:55:11Z"
+        status:
+          type: string
+          enum: [pending, completed, failed]
+          description: Transaction status
+          example: completed
+        error_message:
+          type: string
+          description: Error message if transaction failed
+          example: ""
+
+    TransactionRequest:
+      type: object
+      required:
+        - type
+        - amount
+      properties:
+        type:
+          type: string
+          enum: [deposit, withdraw]
+          description: Type of transaction
+          example: deposit
+        amount:
+          type: number
+          format: double
+          description: Transaction amount
+          example: 250.00
+          minimum: 0.01
+        description:
+          type: string
+          description: Optional transaction description
+          example: Salary deposit
+
+    PaginationInfo:
+      type: object
+      properties:
+        page:
+          type: integer
+          description: Current page number
+          example: 1
+        limit:
+          type: integer
+          description: Number of items per page
+          example: 10
+        total:
+          type: integer
+          format: int64
+          description: Total number of transactions
+          example: 45
+
+    ServiceStatus:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [connected, disconnected, not_configured]
+          example: connected
+        error:
+          type: string
+          description: Error message if service is unavailable
+          example: ""
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          description: Error message
+          example: Account not found
+        details:
+          type: string
+          description: Additional error details
+          example: No account exists with ID acc_nonexistent
+
+  responses:
+    BadRequest:
+      description: Invalid request data
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    
+    InternalServerError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  examples:
+    SampleAccount:
+      summary: Sample account
+      value:
+        id: acc_1234567890abcdef
+        owner_name: John Doe
+        balance: 1500.75
+        created_at: "2024-08-30T20:55:11Z"
+        updated_at: "2024-08-30T20:55:11Z"
+
+    SampleTransaction:
+      summary: Sample completed transaction
+      value:
+        id: txn_1234567890abcdef
+        transaction_id: txn_1234567890abcdef
+        account_id: acc_1234567890abcdef
+        type: deposit
+        amount: 500.00
+        previous_balance: 1000.00
+        new_balance: 1500.00
+        description: Salary deposit
+        timestamp: "2024-08-30T20:55:11Z"
+        status: completed
+        error_message: ""
+
+    AsyncTransactionResponse:
+      summary: Async transaction queued
+      value:
+        message: Transaction queued for processing
+        transaction_id: txn_1234567890abcdef
+        status: pending
+        account_id: acc_1234567890abcdef
+        processing_mode: async
